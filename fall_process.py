@@ -31,6 +31,7 @@ except Exception as e:
 import cv2
 from multiprocessing import Queue
 from fall import SimpleHighAccuracyFallDetector
+from gesture import detect_gesture
 
 
 def run_fall_process(event_queue: Queue, cam_index=0, emergency_flag=None):
@@ -188,10 +189,16 @@ def run_fall_process(event_queue: Queue, cam_index=0, emergency_flag=None):
         "state": "CAMERA_ACTIVE",
         "time": time.time()
     })
+    event_queue.put({
+        "type": "gesture_state",
+        "state": "CAMERA_ACTIVE",
+        "time": time.time()
+    })
 
-    print("📷 Camera opened, fall detection running")
+    print("📷 Camera opened, vision (fall & gesture) detection running")
 
     last_heartbeat_time = 0
+    current_gesture_state = "MONITORING"
 
     while True:
         ret, frame = cap.read()
@@ -201,22 +208,61 @@ def run_fall_process(event_queue: Queue, cam_index=0, emergency_flag=None):
             continue
 
         fall_conf, stand_conf, keypoints = detector.process_frame_fast(frame)
-        
+        now = time.time()
+
+        # ======== GESTURE LOGIC ========
+        detected_gesture = "MONITORING"
+        if keypoints is not None and len(keypoints) > 0:
+            for person in keypoints:
+                # Normalize keypoints to 0.0-1.0 as gesture.py expects
+                norm_person = []
+                for kp in person:
+                    norm_person.append([kp[0] / 640.0, kp[1] / 480.0, kp[2]])
+                
+                gesture = detect_gesture(norm_person, (480, 640, 3))
+                if "Hand on Chest" in gesture:
+                    detected_gesture = "Hand on Chest"
+                    break
+                elif "Hand on Head" in gesture:
+                    detected_gesture = "Hand on Head"
+                elif "Hands Raised" in gesture:
+                    detected_gesture = "Hands Raised"
+                elif "Crossed Arms" in gesture:
+                    detected_gesture = "Crossed Arms"
+
+        if detected_gesture != current_gesture_state:
+            event_queue.put({
+                "type": "gesture_state",
+                "state": detected_gesture,
+                "time": now
+            })
+            current_gesture_state = detected_gesture
+
+        # ======== RECORD & DRAW ========
         is_emergency = False
         if emergency_flag:
             is_emergency = bool(emergency_flag.value)
             
         detector.draw_results(frame, fall_conf, stand_conf, keypoints, emergency_active=is_emergency)
+        
+        color = (0, 0, 255) if current_gesture_state != "MONITORING" else (0, 255, 0)
+        cv2.putText(frame, f"Gesture: {current_gesture_state}", (20, 140),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
 
-        # ✅ HEARTBEAT: Force update every 0.5s if fall is active
-        # This ensures the decision engine checks the time duration
-        now = time.time()
-        if detector.state == "FALL_DETECTED" and (now - last_heartbeat_time > 0.5):
-            event_queue.put({
-                "type": "fall_state",
-                "state": "FALL_DETECTED",
-                "time": now
-            })
+        # ✅ HEARTBEAT: Force update every 0.5s if active
+        if (detector.state == "FALL_DETECTED" or current_gesture_state != "MONITORING") and (now - last_heartbeat_time > 0.5):
+            if detector.state == "FALL_DETECTED":
+                event_queue.put({
+                    "type": "fall_state",
+                    "state": "FALL_DETECTED",
+                    "time": now
+                })
+            if current_gesture_state != "MONITORING":
+                event_queue.put({
+                    "type": "gesture_state",
+                    "state": current_gesture_state,
+                    "time": now
+                })
             last_heartbeat_time = now
 
         # Display - wrap in try-except for headless support

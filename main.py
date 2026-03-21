@@ -56,6 +56,15 @@ if __name__ == "__main__":
                     event["time"]
                 )
 
+            elif event["type"] == "gesture_state":
+
+                print(f"?? Gesture event received: {event['state']}")
+
+                engine.update_gesture_state(
+                    event["state"],
+                    event["time"]
+                )
+
             # Check emergency trigger
             if emergency_flag.value and not last_emergency_state:
 

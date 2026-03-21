@@ -1,0 +1,22 @@
+# Python Cache
+__pycache__/
+*.pyc
+
+# Virtual Environments
+venv/
+env/
+.env
+
+# MacOS
+.DS_Store
+
+# IDEs
+.vscode/
+.idea/
+
+# Secret Configuration Files
+service_account.json
+device_config.json
+
+# Ignore Website folder (this repository is for backend/Pi scripts only)
+website/
