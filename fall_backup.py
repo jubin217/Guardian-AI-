@@ -14,7 +14,6 @@ class SimpleHighAccuracyFallDetector:
 
         # Load YOLOv8 pose model (this works reliably)
         self.pose_model = YOLO('yolov8n-pose.pt')  # Fast and accurate
-        self.obj_model = YOLO('yolov8n.pt')        # Standard model for furniture (beds, couches)
         
         # State management
         self.state = "MONITORING"
@@ -242,35 +241,6 @@ class SimpleHighAccuracyFallDetector:
                 # Calculate confidences
                 fall_confidence = self.calculate_fall_confidence(keypoints, frame.shape)
                 stand_confidence = self.calculate_stand_confidence(keypoints)
-                
-                # Check for beds/couches ONLY if a fall is highly suspected (saves Pi CPU)
-                if fall_confidence > self.fall_confidence_threshold:
-                    obj_results = self.obj_model(processing_frame, verbose=False, conf=0.3, imgsz=320)
-                    furniture_boxes = []
-                    if len(obj_results) > 0:
-                        for box in obj_results[0].boxes:
-                            cls_id = int(box.cls[0])
-                            if cls_id in [56, 57, 59]: # Chair(56), Couch(57), Bed(59)
-                                furniture_boxes.append(box.xyxy[0].cpu().numpy())
-                    
-                    if len(furniture_boxes) > 0:
-                        kp_array = keypoints[0]
-                        valid_kps = [k for k in kp_array if k[2] > 0.1]
-                        if valid_kps:
-                            p_x1 = min([k[0] for k in valid_kps])
-                            p_y1 = min([k[1] for k in valid_kps])
-                            p_x2 = max([k[0] for k in valid_kps])
-                            p_y2 = max([k[1] for k in valid_kps])
-                            
-                            center_x = (p_x1 + p_x2) / 2
-                            center_y = (p_y1 + p_y2) / 2
-                            
-                            for f_box in furniture_boxes:
-                                f_x1, f_y1, f_x2, f_y2 = f_box[0], f_box[1], f_box[2], f_box[3]
-                                if (f_x1 < center_x < f_x2) and (f_y1 < center_y < f_y2):
-                                    print("🛏️ Person is horizontal but resting on furniture. Ignoring fall!")
-                                    fall_confidence = 0.0
-                                    break
         
         # Update state machine
         self.update_state_machine(fall_confidence, stand_confidence)
