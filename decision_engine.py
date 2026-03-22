@@ -6,6 +6,10 @@ import os
 import firebase_admin
 from firebase_admin import credentials
 from firebase_admin import firestore
+try:
+    from telegram_alert import send_telegram_alert
+except ImportError:
+    send_telegram_alert = None
 
 class EmergencyDecisionEngine:
     def __init__(self, emergency_flag=None):
@@ -191,6 +195,15 @@ class EmergencyDecisionEngine:
                 print(f"📡 Emergency synced to Firebase for user {self.user_id}")
             except Exception as e:
                 print(f"🔴 Failed to sync emergency to Firestore: {e}")
+
+        # Dispatch Telegram Alert
+        if send_telegram_alert:
+            try:
+                telegram_msg = f"🚨 GUARDIAN AI CRITICAL ALERT 🚨\n\nReason: {reason}\nTime: {time.strftime('%H:%M:%S')}\nDevice: {self.user_id}"
+                send_telegram_alert(telegram_msg)
+                print("📩 Telegram emergency message dispatched.")
+            except Exception as e:
+                print(f"🔴 Failed to invoke Telegram alert module: {e}")
 
     def emergency_complete(self):
        self.emergency_active = False
