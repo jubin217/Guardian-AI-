@@ -32,6 +32,52 @@ import cv2
 from multiprocessing import Queue
 from fall import SimpleHighAccuracyFallDetector
 from gesture import detect_gesture
+import threading
+from flask import Flask, Response
+
+# Required to let React safely request images from Python
+try:
+    from flask_cors import CORS
+except ImportError:
+    # We will let system gracefully fail or you can install it via pip install flask-cors
+    pass
+
+# Shared Thread-Safe Resource for MJPEG Stream
+global_frame = None
+lock = threading.Lock()
+
+# Minimalist Flask API
+app = Flask(__name__)
+try:
+    CORS(app)
+except Exception:
+    pass
+
+def generate_frames():
+    """Generator loop converting raw OpenCV matrices into network-friendly multipart JPEG streams."""
+    global global_frame, lock
+    while True:
+        with lock:
+            if global_frame is None:
+                time.sleep(0.05)
+                continue
+            # Encode frame explicitly to .jpg 
+            ret, buffer = cv2.imencode('.jpg', global_frame)
+            if not ret:
+                time.sleep(0.05)
+                continue
+            frame_bytes = buffer.tobytes()
+        
+        # Yield multipart header and boundary for continuous HTML <img> rendering
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        # Rate limit to ~30fps max to save Pi CPU bandwidth
+        time.sleep(0.03) 
+
+@app.route('/video_feed')
+def video_feed():
+    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
 
 
 def run_fall_process(event_queue: Queue, cam_index=0, emergency_flag=None):
@@ -183,6 +229,14 @@ def run_fall_process(event_queue: Queue, cam_index=0, emergency_flag=None):
         event_queue.put({"type": "error", "source": "camera", "message": "No camera found"})
         return
 
+    # Spin up Flask in a completely independent background Daemon thread
+    flask_thread = threading.Thread(
+        target=lambda: app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False), 
+        daemon=True
+    )
+    flask_thread.start()
+    print("🌐 Flask live stream server active on port 5000 (/video_feed)")
+
     # ✅ NEW: confirm camera + fall pipeline is alive
     event_queue.put({
         "type": "fall_state",
@@ -248,6 +302,13 @@ def run_fall_process(event_queue: Queue, cam_index=0, emergency_flag=None):
         color = (0, 0, 255) if current_gesture_state != "MONITORING" else (0, 255, 0)
         cv2.putText(frame, f"Gesture: {current_gesture_state}", (20, 140),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+
+        # ----------------------------------------------------
+        # Safely hand off local frame clone to Web Socket
+        # ----------------------------------------------------
+        global global_frame, lock
+        with lock:
+            global_frame = frame.copy()
 
         # ✅ HEARTBEAT: Force update every 0.5s if active
         if (detector.state == "FALL_DETECTED" or current_gesture_state != "MONITORING") and (now - last_heartbeat_time > 0.5):

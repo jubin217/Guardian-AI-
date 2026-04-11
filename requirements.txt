@@ -20,10 +20,12 @@ faster-whisper>=0.10.0
 speechbrain>=0.5.15
 pyttsx3>=2.90
 
-# NLP
+# NLP & Generation
 transformers>=4.36
 langdetect>=1.0.9
 deep-translator>=1.11.4
+google-generativeai>=0.4.0
+Pillow>=10.0.0
 
 # CV / Face
 opencv-python>=4.9

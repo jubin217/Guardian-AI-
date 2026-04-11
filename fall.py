@@ -4,6 +4,16 @@ from ultralytics import YOLO
 import time
 from collections import deque
 import warnings
+import os
+import json
+import threading
+try:
+    import google.generativeai as genai
+    from PIL import Image
+    HAS_GEMINI = True
+except ImportError:
+    HAS_GEMINI = False
+
 warnings.filterwarnings('ignore')
 
 class SimpleHighAccuracyFallDetector:
@@ -15,6 +25,21 @@ class SimpleHighAccuracyFallDetector:
         # Load YOLOv8 pose model (this works reliably)
         self.pose_model = YOLO('yolov8n-pose.pt')  # Fast and accurate
         self.obj_model = YOLO('yolov8n.pt')        # Standard model for furniture (beds, couches)
+        
+        self.gemini_model = None
+        if HAS_GEMINI:
+            config_path = os.path.join(os.path.dirname(__file__), 'device_config.json')
+            try:
+                if os.path.exists(config_path):
+                    with open(config_path, 'r') as f:
+                        config = json.load(f)
+                        api_key = config.get("gemini_api_key")
+                        if api_key and api_key != "":
+                            genai.configure(api_key=api_key)
+                            self.gemini_model = genai.GenerativeModel('gemini-1.5-flash')
+                            print("🧠 Google Gemini VLM configured for deep verification!")
+            except Exception as e:
+                print(f"⚠️ Failed to load Gemini config: {e}")
         
         # State management
         self.state = "MONITORING"
@@ -165,7 +190,51 @@ class SimpleHighAccuracyFallDetector:
         
         return np.mean(stand_scores) if stand_scores else 0.0
 
-    def update_state_machine(self, fall_confidence, stand_confidence):
+    def verify_with_gemini(self, frame_bgr):
+        """Asynchronous Gemini verification. If yes, escalate to FALL_DETECTED."""
+        if not self.gemini_model or frame_bgr is None:
+            # Fallback to standard validation if Gemini is unavailable or not configured
+            self.state = "FALL_DETECTED"
+            self.fall_start_time = time.time()
+            if self.on_state_change:
+                self.on_state_change(self.state, time.time())
+            print("🚨 FALL DETECTED (Gemini fallback)! Confidence high.")
+            return
+
+        print("🔄 [Gemini] Uploading anomaly frame to VLM cloud verification...")
+        try:
+            # Convert BGR to RGB, then to PIL Image
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            pil_img = Image.fromarray(frame_rgb)
+            prompt = (
+                "You are an expert medical computer vision assistant. "
+                "Look at this image. Is the person in the image experiencing a medical emergency "
+                "or dangerous fall? Or are they doing something normal like fixing a sink, sleeping, hanging out? Reply with EXACTLY "
+                "the word YES or NO."
+            )
+            response = self.gemini_model.generate_content([prompt, pil_img])
+            verdict = response.text.strip().upper()
+            print(f"🧠 [Gemini] VLM Verdict: {verdict}")
+
+            if "YES" in verdict:
+                self.state = "FALL_DETECTED"
+                self.fall_start_time = time.time()
+                if self.on_state_change:
+                    self.on_state_change(self.state, time.time())
+                print("🚨 FALL CONFIRMED BY GEMINI!")
+            else:
+                print("✅ [Gemini] Classified as normal behavior. Alarm CANCELED.")
+                self.state = "MONITORING"
+                self.consecutive_fall_frames = 0
+                self.fall_confidence_history.clear()
+        except Exception as e:
+            print(f"⚠️ [Gemini] Verification failed: {e}. Defaulting to FALL_DETECTED.")
+            self.state = "FALL_DETECTED"
+            self.fall_start_time = time.time()
+            if self.on_state_change:
+                self.on_state_change(self.state, time.time())
+
+    def update_state_machine(self, fall_confidence, stand_confidence, processing_frame=None):
         """Smart state management to reduce false alarms"""
         now = time.time()
         current_time = now
@@ -179,16 +248,17 @@ class SimpleHighAccuracyFallDetector:
                 if (self.consecutive_fall_frames >= self.required_fall_frames and 
                     np.mean(list(self.fall_confidence_history)) > self.fall_confidence_threshold):
                     
-                    self.state = "FALL_DETECTED"
-                    self.fall_start_time = current_time
+                    self.state = "VERIFYING_FALL"
                     self.total_falls += 1
                     self.consecutive_stand_frames = 0
                     
-                    if self.on_state_change:
-                        self.on_state_change(self.state, now)
+                    if processing_frame is not None:
+                        # Send to background thread to prevent pausing CV2 loop
+                        threading.Thread(target=self.verify_with_gemini, args=(processing_frame.copy(),), daemon=True).start()
+                    else:
+                        self.verify_with_gemini(None)
                     
-                    print(f"🚨 FALL DETECTED! Confidence: {fall_confidence:.3f}")
-                    # print("System paused. Stand up to resume monitoring...")
+                    print(f"⚠️ Anomaly suspected! Initiating Gemini verification... (Conf: {fall_confidence:.3f})")
             else:
                 # Reset if confidence drops
                 self.consecutive_fall_frames = max(0, self.consecutive_fall_frames - 2)
@@ -273,7 +343,7 @@ class SimpleHighAccuracyFallDetector:
                                     break
         
         # Update state machine
-        self.update_state_machine(fall_confidence, stand_confidence)
+        self.update_state_machine(fall_confidence, stand_confidence, frame)
         
         return fall_confidence, stand_confidence, keypoints
 
