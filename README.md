@@ -85,4 +85,4 @@ The system will:
 3. Hook into the microphone.
 4. Output real-time events to the terminal and sync anomalies securely to the cloud.
 
-Enjoy total peace of mind!
+Enjoy total peace of mind!!
